@@ -2,448 +2,742 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : STM32F407VGT6 - ADC + ESC + MPU6050 + UART
   ******************************************************************************
   */
 /* USER CODE END Header */
+
+
 /* Includes ------------------------------------------------------------------*/
+
 #include "main.h"
 #include "adc.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "mpu6050.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-#include "string.h"
-#include "stdio.h"
-/* USER CODE END Includes */
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-extern ADC_HandleTypeDef hadc1;
-extern TIM_HandleTypeDef htim1;
-extern UART_HandleTypeDef huart2;
-
-uint32_t AD_RES = 0;
-uint16_t ESC_Pulse = 1000;
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
-/* USER CODE BEGIN PV */
+MPU6050_t MPU6050;
+
+uint32_t AD_RES = 0;
+
+uint32_t ESC_Pulse = 1000;
 
 uint8_t mpu_ok = 0;
+
+uint8_t mpu_error = 0;
+
 uint8_t motor_running = 0;
-/* USER CODE END PV */
+
 
 /* Private function prototypes -----------------------------------------------*/
+
 void SystemClock_Config(void);
-/* USER CODE BEGIN PFP */
+
 void Error_Handler(void);
 
-uint16_t ADC_To_ESC(uint32_t adc_value)
+static void UART_Send_Text(const char *text);
+
+static uint32_t ADC_Read(void);
+
+static uint32_t ADC_To_ESC(uint32_t adc_value);
+
+static void ESC_SetPulse(uint32_t pulse_us);
+
+static void ESC_Arm(void);
+
+static void UART_Send_Status(void);
+
+
+/* ========================================================================== */
+/* UART SEND TEXT                                                             */
+/* ========================================================================== */
+
+static void UART_Send_Text(const char *text)
 {
-uint16_t pulse;
-
-if (adc_value > 4095U)
-{
-    adc_value = 4095U;
-}
-
-pulse = (uint16_t)(1000U +
-         ((adc_value * 1000U) / 4095U));
-
-return pulse;
-
-}
-
-void ESC_SetPulse(uint16_t pulse_us)
-{
-if (pulse_us < 1000U)
-{
-pulse_us = 1000U;
-}
-
-if (pulse_us > 2000U)
-{
-    pulse_us = 2000U;
-}
-
-__HAL_TIM_SET_COMPARE(&htim1,
-                      TIM_CHANNEL_1,
-                      pulse_us);
-
-}
-
-void UART_Send_Status(uint32_t adc,
-uint16_t pulse)
-{
-char buffer[100];
-
-sprintf(buffer,
-        "ADC = %lu | ESC PWM = %u us\r\n",
-        adc,
-        pulse);
-
-HAL_UART_Transmit(&huart2,
-                  (uint8_t *)buffer,
-                  strlen(buffer),
-                  HAL_MAX_DELAY);
-
-}
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-static void SetMotorStatusLeds(uint8_t running)
-{
-    /* On this board: PD13 = green, PD12 = red, both active-low */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, running ? GPIO_PIN_RESET : GPIO_PIN_SET); /* green */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, running ? GPIO_PIN_SET : GPIO_PIN_RESET); /* red */
+    HAL_UART_Transmit(
+        &huart2,
+        (uint8_t *)text,
+        (uint16_t)strlen(text),
+        HAL_MAX_DELAY
+    );
 }
 
 
-/* USER CODE END 0 */
+/* ========================================================================== */
+/* ADC READ                                                                   */
+/* ========================================================================== */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
+static uint32_t ADC_Read(void)
+{
+    uint32_t value = 0;
+
+    if (HAL_ADC_Start(&hadc1) != HAL_OK)
+    {
+        return 0;
+    }
+
+    if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK)
+    {
+        value = HAL_ADC_GetValue(&hadc1);
+    }
+
+    HAL_ADC_Stop(&hadc1);
+
+    return value;
+}
+
+
+/* ========================================================================== */
+/* ADC -> ESC                                                                 */
+/* ========================================================================== */
+
+/*
+ * ADC = 0       -> 1000 us
+ * ADC = 4095    -> 1500 us
+ *
+ * Pour les premiers tests :
+ *
+ * 1000 us = minimum
+ * 1500 us = maximum de test
+ */
+
+static uint32_t ADC_To_ESC(uint32_t adc_value)
+{
+    uint32_t pulse;
+
+    if (adc_value > 4095U)
+    {
+        adc_value = 4095U;
+    }
+
+    pulse =
+        1000U +
+        ((adc_value * 500U) / 4095U);
+
+    if (pulse < 1000U)
+    {
+        pulse = 1000U;
+    }
+
+    if (pulse > 1500U)
+    {
+        pulse = 1500U;
+    }
+
+    return pulse;
+}
+
+
+/* ========================================================================== */
+/* ESC SET PULSE                                                              */
+/* ========================================================================== */
+
+static void ESC_SetPulse(uint32_t pulse_us)
+{
+    /*
+     * Sécurité minimum
+     */
+
+    if (pulse_us < 1000U)
+    {
+        pulse_us = 1000U;
+    }
+
+
+    /*
+     * Limite pour les premiers tests
+     */
+
+    if (pulse_us > 1500U)
+    {
+        pulse_us = 1500U;
+    }
+
+
+    /*
+     * TIM1 CH1
+     *
+     * TIM1 = 168 MHz
+     * Prescaler = 167
+     *
+     * Timer frequency = 1 MHz
+     *
+     * 1 tick = 1 us
+     */
+
+    __HAL_TIM_SET_COMPARE(
+        &htim1,
+        TIM_CHANNEL_1,
+        pulse_us
+    );
+
+
+    ESC_Pulse = pulse_us;
+
+
+    /*
+     * Etat du moteur
+     */
+
+    if (pulse_us > 1050U)
+    {
+        motor_running = 1;
+    }
+    else
+    {
+        motor_running = 0;
+    }
+}
+
+
+/* ========================================================================== */
+/* ESC ARM                                                                    */
+/* ========================================================================== */
+
+static void ESC_Arm(void)
+{
+    UART_Send_Text(
+        "\r\n"
+        "========================================\r\n"
+        "             ESC ARMING                \r\n"
+        "========================================\r\n"
+    );
+
+
+    /*
+     * Minimum throttle
+     */
+
+    ESC_SetPulse(1000U);
+
+
+    UART_Send_Text(
+        "ESC PWM = 1000 us\r\n"
+    );
+
+
+    UART_Send_Text(
+        "Waiting 5 seconds...\r\n"
+    );
+
+
+    /*
+     * Attendre l'initialisation de l'ESC
+     */
+
+    HAL_Delay(5000);
+
+
+    UART_Send_Text(
+        "ESC READY\r\n"
+    );
+}
+
+
+/* ========================================================================== */
+/* UART STATUS                                                                */
+/* ========================================================================== */
+
+static void UART_Send_Status(void)
+{
+    char message[200];
+
+
+    if (mpu_ok == 1)
+    {
+        snprintf(
+            message,
+            sizeof(message),
+
+            "ADC=%lu | "
+            "Roll=%.2f | "
+            "Pitch=%.2f | "
+            "ESC=%lu us | "
+            "MOTOR=%u\r\n",
+
+            (unsigned long)AD_RES,
+
+            MPU6050.KalmanAngleX,
+
+            MPU6050.KalmanAngleY,
+
+            (unsigned long)ESC_Pulse,
+
+            motor_running
+        );
+    }
+    else
+    {
+        snprintf(
+            message,
+            sizeof(message),
+
+            "ADC=%lu | "
+            "MPU ERROR=%u | "
+            "ESC=%lu us | "
+            "MOTOR=%u\r\n",
+
+            (unsigned long)AD_RES,
+
+            mpu_error,
+
+            (unsigned long)ESC_Pulse,
+
+            motor_running
+        );
+    }
+
+
+    UART_Send_Text(message);
+}
+
+
+/* ========================================================================== */
+/* MAIN                                                                       */
+/* ========================================================================== */
+
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
-  SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_TIM1_Init();
-  MX_USART2_UART_Init();
-  MX_ADC1_Init();
-  /* USER CODE BEGIN 2 */
-  /* ==========================================================
-  UART START
-  ========================================================== */
-
-  char start_msg[] =
-  "\r\n"
-  "========================================\r\n"
-  " STM32F407VGT6 - ADC + ESC TEST\r\n"
-  " MPU6050 DISABLED\r\n"
-  "========================================\r\n";
-
-  HAL_UART_Transmit(&huart2,
-  (uint8_t *)start_msg,
-  strlen(start_msg),
-  HAL_MAX_DELAY);
-
-  /* ==========================================================
-  ESC INITIALIZATION
-  ========================================================== */
-
-  char esc_msg[] =
-  "ESC: PWM initialization...\r\n";
-
-  HAL_UART_Transmit(&huart2,
-  (uint8_t *)esc_msg,
-  strlen(esc_msg),
-  HAL_MAX_DELAY);
-
-  /*
-
-  Minimum throttle
-  */
-
-  ESC_SetPulse(1000);
-
-  /*
-
-  Start TIM1 CH1 PWM
-  */
-
-  if (HAL_TIM_PWM_Start(&htim1,
-  TIM_CHANNEL_1) != HAL_OK)
-  {
-  char error_msg[] =
-  "ERROR: TIM1 PWM START FAILED\r\n";
-
-  HAL_UART_Transmit(&huart2,
-                    (uint8_t *)error_msg,
-                    strlen(error_msg),
-                    HAL_MAX_DELAY);
-
-  Error_Handler();
-
-  }
-
-  /*
-
-  Keep ESC at minimum throttle
-  for 5 seconds.
-  */
-
-  char wait_msg[] =
-  "ESC: 1000 us\r\n"
-  "ESC: waiting 5 seconds...\r\n";
-
-  HAL_UART_Transmit(&huart2,
-  (uint8_t *)wait_msg,
-  strlen(wait_msg),
-  HAL_MAX_DELAY);
-
-  HAL_Delay(5000);
-
-  /*
-
-  ESC ready
-  */
-
-  char ready_msg[] =
-  "ESC: READY\r\n"
-  "ADC control enabled\r\n";
-
-  HAL_UART_Transmit(&huart2,
-  (uint8_t *)ready_msg,
-  strlen(ready_msg),
-  HAL_MAX_DELAY);
+    uint32_t loop_counter = 0;
 
 
-  void UART_Send_Status(uint32_t adc, uint16_t pulse)
-  {
-  char buffer[100];
-  sprintf(buffer,
-          "ADC = %lu | ESC PWM = %u us\r\n",
-          adc,
-          pulse);
+    /* ====================================================================== */
+    /* HAL INITIALIZATION                                                     */
+    /* ====================================================================== */
 
-  HAL_UART_Transmit(&huart2,
-                    (uint8_t *)buffer,
-                    strlen(buffer),
-                    HAL_MAX_DELAY);
-
-  }
+    HAL_Init();
 
 
+    /* ====================================================================== */
+    /* SYSTEM CLOCK                                                            */
+    /* ====================================================================== */
 
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-    /* USER CODE END WHILE */
-
-	      uint32_t adc_value;
-	      uint16_t esc_pulse;
-	      char buffer[100];
-
-	      /* ==========================================
-	         1. Start ADC
-	         ========================================== */
-	      if (HAL_ADC_Start(&hadc1) == HAL_OK)
-	      {
-	          /* ==========================================
-	             2. Wait for ADC conversion
-	             ========================================== */
-	          if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK)
-	          {
-	              /* ==========================================
-	                 3. Read ADC value
-	                 ADC = 0 ... 4095
-	                 ========================================== */
-	              adc_value = HAL_ADC_GetValue(&hadc1);
-
-	              /* ==========================================
-	                 4. Convert ADC to ESC PWM
-
-	                 ADC = 0     -> 1000 us
-	                 ADC = 4095  -> 2000 us
-	                 ========================================== */
-	              esc_pulse = 1000U +
-	                          (uint16_t)((adc_value * 1000U) / 4095U);
-
-	              /* Safety limits */
-	              if (esc_pulse < 1000U)
-	              {
-	                  esc_pulse = 1000U;
-	              }
-
-	              if (esc_pulse > 2000U)
-	              {
-	                  esc_pulse = 2000U;
-	              }
-
-	              /* ==========================================
-	                 5. Send PWM to ESC
-	                 ========================================== */
-	              __HAL_TIM_SET_COMPARE(&htim1,
-	                                    TIM_CHANNEL_1,
-	                                    esc_pulse);
-
-	              /* ==========================================
-	                 6. Display ADC and PWM on UART
-	                 ========================================== */
-	              sprintf(buffer,
-	                      "ADC = %lu | ESC PWM = %u us\r\n",
-	                      adc_value,
-	                      esc_pulse);
-
-	              HAL_UART_Transmit(&huart2,
-	                                (uint8_t *)buffer,
-	                                strlen(buffer),
-	                                HAL_MAX_DELAY);
-	          }
-
-	          /* ==========================================
-	             7. Stop ADC
-	             ========================================== */
-	          HAL_ADC_Stop(&hadc1);
-	      }
-
-	      /* ==========================================
-	         8. Small delay
-	         ========================================== */
-	      HAL_Delay(100);
-	  }
+    SystemClock_Config();
 
 
-	  /* Start TIM1 PWM */
-	  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
-	  {
-	      Error_Handler();
-	  }
+    /* ====================================================================== */
+    /* GPIO                                                                    */
+    /* ====================================================================== */
 
-	  /* Minimum throttle */
-	  __HAL_TIM_SET_COMPARE(&htim1,
-	                        TIM_CHANNEL_1,
-	                        1000);
-
-	  /* Wait for ESC arming */
-	  HAL_Delay(5000);
+    MX_GPIO_Init();
 
 
-    /* USER CODE BEGIN 3 */
+    /* ====================================================================== */
+    /* I2C1                                                                    */
+    /* ====================================================================== */
 
-  /* USER CODE END 3 */
+    MX_I2C1_Init();
+
+
+    /* ====================================================================== */
+    /* TIM1                                                                    */
+    /* ====================================================================== */
+
+    MX_TIM1_Init();
+
+
+    /* ====================================================================== */
+    /* USART2                                                                  */
+    /* ====================================================================== */
+
+    MX_USART2_UART_Init();
+
+
+    /* ====================================================================== */
+    /* ADC1                                                                    */
+    /* ====================================================================== */
+
+    MX_ADC1_Init();
+
+
+    /* ====================================================================== */
+    /* WAIT                                                                    */
+    /* ====================================================================== */
+
+    HAL_Delay(500);
+
+
+    /* ====================================================================== */
+    /* START MESSAGE                                                           */
+    /* ====================================================================== */
+
+    UART_Send_Text(
+        "\r\n"
+        "\r\n"
+        "========================================\r\n"
+        "        STM32F407VGT6                  \r\n"
+        "        ADC + ESC + MPU6050            \r\n"
+        "========================================\r\n"
+        "\r\n"
+    );
+
+
+    /* ====================================================================== */
+    /* START TIM1 PWM                                                          */
+    /* ====================================================================== */
+
+    UART_Send_Text(
+        "Starting TIM1 PWM...\r\n"
+    );
+
+
+    if (HAL_TIM_PWM_Start(
+            &htim1,
+            TIM_CHANNEL_1
+        ) != HAL_OK)
+    {
+        UART_Send_Text(
+            "ERROR: TIM1 PWM START FAILED\r\n"
+        );
+
+        Error_Handler();
+    }
+
+
+    UART_Send_Text(
+        "TIM1 PWM OK\r\n"
+    );
+
+
+    /* ====================================================================== */
+    /* INITIAL ESC VALUE                                                       */
+    /* ====================================================================== */
+
+    ESC_SetPulse(1000U);
+
+
+    /* ====================================================================== */
+    /* MPU6050 INITIALIZATION                                                  */
+    /* ====================================================================== */
+
+    UART_Send_Text(
+        "\r\n"
+        "MPU6050 initialization...\r\n"
+    );
+
+
+    mpu_error =
+        MPU6050_Init(&hi2c1);
+
+
+    if (mpu_error == 0)
+    {
+        mpu_ok = 1;
+
+        UART_Send_Text(
+            "MPU6050 OK\r\n"
+        );
+    }
+    else
+    {
+        mpu_ok = 0;
+
+        char error_message[120];
+
+
+        snprintf(
+            error_message,
+            sizeof(error_message),
+
+            "MPU6050 ERROR - CODE=%u\r\n",
+
+            mpu_error
+        );
+
+
+        UART_Send_Text(
+            error_message
+        );
+
+
+        UART_Send_Text(
+            "WARNING: MPU6050 unavailable.\r\n"
+        );
+
+
+        UART_Send_Text(
+            "ADC can still control the motor.\r\n"
+        );
+    }
+
+
+    /* ====================================================================== */
+    /* ESC ARM                                                                 */
+    /* ====================================================================== */
+
+    ESC_Arm();
+
+
+    /* ====================================================================== */
+    /* APPLICATION START                                                       */
+    /* ====================================================================== */
+
+    UART_Send_Text(
+        "\r\n"
+        "========================================\r\n"
+        "        APPLICATION START               \r\n"
+        "========================================\r\n"
+    );
+
+
+    UART_Send_Text(
+        "ADC -> ESC -> MOTOR\r\n"
+    );
+
+
+    UART_Send_Text(
+        "ADC = 0    -> ESC = 1000 us\r\n"
+    );
+
+
+    UART_Send_Text(
+        "ADC = 4095 -> ESC = 1500 us\r\n"
+    );
+
+
+    UART_Send_Text(
+        "MPU6050 = diagnostic sensor\r\n"
+    );
+
+
+    /* ====================================================================== */
+    /* MAIN LOOP                                                               */
+    /* ====================================================================== */
+
+    while (1)
+    {
+        /* ================================================================== */
+        /* READ ADC                                                            */
+        /* ================================================================== */
+
+        AD_RES = ADC_Read();
+
+
+        /* ================================================================== */
+        /* READ MPU6050                                                        */
+        /* ================================================================== */
+
+        if (mpu_ok == 1)
+        {
+            MPU6050_Read_All(
+                &hi2c1,
+                &MPU6050
+            );
+        }
+
+
+        /* ================================================================== */
+        /* ADC -> ESC                                                           */
+        /* ================================================================== */
+
+        ESC_Pulse =
+            ADC_To_ESC(
+                AD_RES
+            );
+
+
+        ESC_SetPulse(
+            ESC_Pulse
+        );
+
+
+        /* ================================================================== */
+        /* LED MOTOR STATUS                                                    */
+        /* ================================================================== */
+
+        if (motor_running == 1)
+        {
+            HAL_GPIO_WritePin(
+                GPIOD,
+                GPIO_PIN_12,
+                GPIO_PIN_SET
+            );
+        }
+        else
+        {
+            HAL_GPIO_WritePin(
+                GPIOD,
+                GPIO_PIN_12,
+                GPIO_PIN_RESET
+            );
+        }
+
+
+        /* ================================================================== */
+        /* UART DEBUG                                                           */
+        /* ================================================================== */
+
+        if ((loop_counter % 10U) == 0U)
+        {
+            UART_Send_Status();
+        }
+
+
+        /* ================================================================== */
+        /* LOOP COUNTER                                                        */
+        /* ================================================================== */
+
+        loop_counter++;
+
+
+        /* ================================================================== */
+        /* 20 ms CONTROL PERIOD                                                */
+        /* ================================================================== */
+
+        HAL_Delay(20);
+    }
 }
 
-/**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+
+/* ========================================================================== */
+/* SYSTEM CLOCK CONFIGURATION                                                 */
+/* ========================================================================== */
+
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 168;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+    /* ====================================================================== */
+    /* POWER                                                                   */
+    /* ====================================================================== */
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    __HAL_RCC_PWR_CLK_ENABLE();
+
+
+    __HAL_PWR_VOLTAGESCALING_CONFIG(
+        PWR_REGULATOR_VOLTAGE_SCALE1
+    );
+
+
+    /* ====================================================================== */
+    /* HSE + PLL                                                               */
+    /* ====================================================================== */
+
+    RCC_OscInitStruct.OscillatorType =
+        RCC_OSCILLATORTYPE_HSE;
+
+
+    RCC_OscInitStruct.HSEState =
+        RCC_HSE_ON;
+
+
+    RCC_OscInitStruct.PLL.PLLState =
+        RCC_PLL_ON;
+
+
+    RCC_OscInitStruct.PLL.PLLSource =
+        RCC_PLLSOURCE_HSE;
+
+
+    RCC_OscInitStruct.PLL.PLLM =
+        4;
+
+
+    RCC_OscInitStruct.PLL.PLLN =
+        168;
+
+
+    RCC_OscInitStruct.PLL.PLLP =
+        RCC_PLLP_DIV2;
+
+
+    RCC_OscInitStruct.PLL.PLLQ =
+        4;
+
+
+    if (HAL_RCC_OscConfig(
+            &RCC_OscInitStruct
+        ) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+
+    /* ====================================================================== */
+    /* CLOCK CONFIGURATION                                                     */
+    /* ====================================================================== */
+
+    RCC_ClkInitStruct.ClockType =
+          RCC_CLOCKTYPE_HCLK
+        | RCC_CLOCKTYPE_SYSCLK
+        | RCC_CLOCKTYPE_PCLK1
+        | RCC_CLOCKTYPE_PCLK2;
+
+
+    RCC_ClkInitStruct.SYSCLKSource =
+        RCC_SYSCLKSOURCE_PLLCLK;
+
+
+    RCC_ClkInitStruct.AHBCLKDivider =
+        RCC_SYSCLK_DIV1;
+
+
+    RCC_ClkInitStruct.APB1CLKDivider =
+        RCC_HCLK_DIV4;
+
+
+    RCC_ClkInitStruct.APB2CLKDivider =
+        RCC_HCLK_DIV2;
+
+
+    if (HAL_RCC_ClockConfig(
+            &RCC_ClkInitStruct,
+            FLASH_LATENCY_5
+        ) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
+
+
+/* ========================================================================== */
+/* ERROR HANDLER                                                              */
+/* ========================================================================== */
+
+void Error_Handler(void)
+{
+    __disable_irq();
+
+
+    /*
+     * Sécurité ESC :
+     * minimum throttle
+     */
+
+    if (htim1.Instance != NULL)
+    {
+        __HAL_TIM_SET_COMPARE(
+            &htim1,
+            TIM_CHANNEL_1,
+            1000U
+        );
+    }
+
+
+    while (1)
+    {
+        HAL_GPIO_TogglePin(
+            GPIOD,
+            GPIO_PIN_13
+        );
+
+        HAL_Delay(200);
+    }
+}
+
 
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
-void Error_Handler(void)
-{
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
-  /* USER CODE END Error_Handler_Debug */
-}
-
-#ifdef  USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */

@@ -1,7 +1,9 @@
-../Core/Src/main.c:66:10:ADC_To_ESC	2
-../Core/Src/main.c:82:6:ESC_SetPulse	3
-../Core/Src/main.c:100:6:UART_Send_Status	1
-../Core/Src/main.c:120:13:SetMotorStatusLeds	1
-../Core/Src/main.c:134:5:main	6
-../Core/Src/main.c:374:6:SystemClock_Config	3
-../Core/Src/main.c:423:6:Error_Handler	1
+../Core/Src/main.c:64:13:UART_Send_Text	1
+../Core/Src/main.c:79:17:ADC_Read	3
+../Core/Src/main.c:113:17:ADC_To_ESC	4
+../Core/Src/main.c:144:13:ESC_SetPulse	4
+../Core/Src/main.c:206:13:ESC_Arm	1
+../Core/Src/main.c:250:13:UART_Send_Status	2
+../Core/Src/main.c:308:5:main	6
+../Core/Src/main.c:605:6:SystemClock_Config	3
+../Core/Src/main.c:709:6:Error_Handler	2
