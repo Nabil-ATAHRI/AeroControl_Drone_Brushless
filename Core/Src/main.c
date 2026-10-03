@@ -2,34 +2,75 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : STM32F407VGT6 - ADC + ESC + MPU6050 + UART
+  * @brief          : ADC + ESC + MPU6050 + RGB LED
+  *
+  *                    STM32F407VGT6
+  *
   ******************************************************************************
   */
 /* USER CODE END Header */
 
-
 /* Includes ------------------------------------------------------------------*/
-
 #include "main.h"
 #include "adc.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+
 #include "mpu6050.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* RGB LED
+ *
+ * RED   = PA8
+ * GREEN = PC8
+ * BLUE  = PC6
+ *
+ * Common cathode:
+ * HIGH = ON
+ * LOW  = OFF
+ */
+
+/* ADC thresholds */
+#define ADC_BLUE_MAX       999U
+#define ADC_GREEN_MAX      3000U
+
+/* ESC limits */
+#define ESC_MIN_US         1000U
+#define ESC_MAX_US         1500U
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
 
 MPU6050_t MPU6050;
 
 uint32_t AD_RES = 0;
 
-uint32_t ESC_Pulse = 1000;
+uint32_t ESC_Pulse = ESC_MIN_US;
 
 uint8_t mpu_ok = 0;
 
@@ -37,28 +78,42 @@ uint8_t mpu_error = 0;
 
 uint8_t motor_running = 0;
 
+/* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
-
 void SystemClock_Config(void);
 
-void Error_Handler(void);
+/* USER CODE BEGIN PFP */
 
 static void UART_Send_Text(const char *text);
 
 static uint32_t ADC_Read(void);
 
-static uint32_t ADC_To_ESC(uint32_t adc_value);
+static uint32_t ADC_To_ESC(uint32_t adc);
 
 static void ESC_SetPulse(uint32_t pulse_us);
 
 static void ESC_Arm(void);
 
-static void UART_Send_Status(void);
+static void RGB_SetColor(
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue
+);
 
+static void RGB_UpdateFromADC(uint32_t adc);
+
+static void MPU_Diagnostic_Read(void);
+
+static void Send_Status(void);
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
 
 /* ========================================================================== */
-/* UART SEND TEXT                                                             */
+/* UART                                                                       */
 /* ========================================================================== */
 
 static void UART_Send_Text(const char *text)
@@ -66,14 +121,14 @@ static void UART_Send_Text(const char *text)
     HAL_UART_Transmit(
         &huart2,
         (uint8_t *)text,
-        (uint16_t)strlen(text),
-        HAL_MAX_DELAY
+        strlen(text),
+        100
     );
 }
 
 
 /* ========================================================================== */
-/* ADC READ                                                                   */
+/* ADC                                                                        */
 /* ========================================================================== */
 
 static uint32_t ADC_Read(void)
@@ -100,93 +155,54 @@ static uint32_t ADC_Read(void)
 /* ADC -> ESC                                                                 */
 /* ========================================================================== */
 
-/*
- * ADC = 0       -> 1000 us
- * ADC = 4095    -> 1500 us
- *
- * Pour les premiers tests :
- *
- * 1000 us = minimum
- * 1500 us = maximum de test
- */
-
-static uint32_t ADC_To_ESC(uint32_t adc_value)
+static uint32_t ADC_To_ESC(uint32_t adc)
 {
     uint32_t pulse;
 
-    if (adc_value > 4095U)
+    if (adc > 4095U)
     {
-        adc_value = 4095U;
+        adc = 4095U;
     }
+
+    /*
+     * ADC = 0
+     *     -> 1000 us
+     *
+     * ADC = 4095
+     *     -> 1500 us
+     */
 
     pulse =
-        1000U +
-        ((adc_value * 500U) / 4095U);
-
-    if (pulse < 1000U)
-    {
-        pulse = 1000U;
-    }
-
-    if (pulse > 1500U)
-    {
-        pulse = 1500U;
-    }
+        ESC_MIN_US +
+        ((adc * (ESC_MAX_US - ESC_MIN_US)) / 4095U);
 
     return pulse;
 }
 
 
 /* ========================================================================== */
-/* ESC SET PULSE                                                              */
+/* ESC PWM                                                                    */
 /* ========================================================================== */
 
 static void ESC_SetPulse(uint32_t pulse_us)
 {
-    /*
-     * Sécurité minimum
-     */
-
-    if (pulse_us < 1000U)
+    if (pulse_us < ESC_MIN_US)
     {
-        pulse_us = 1000U;
+        pulse_us = ESC_MIN_US;
     }
 
-
-    /*
-     * Limite pour les premiers tests
-     */
-
-    if (pulse_us > 1500U)
+    if (pulse_us > ESC_MAX_US)
     {
-        pulse_us = 1500U;
+        pulse_us = ESC_MAX_US;
     }
 
-
-    /*
-     * TIM1 CH1
-     *
-     * TIM1 = 168 MHz
-     * Prescaler = 167
-     *
-     * Timer frequency = 1 MHz
-     *
-     * 1 tick = 1 us
-     */
+    ESC_Pulse = pulse_us;
 
     __HAL_TIM_SET_COMPARE(
         &htim1,
         TIM_CHANNEL_1,
         pulse_us
     );
-
-
-    ESC_Pulse = pulse_us;
-
-
-    /*
-     * Etat du moteur
-     */
 
     if (pulse_us > 1050U)
     {
@@ -200,7 +216,7 @@ static void ESC_SetPulse(uint32_t pulse_us)
 
 
 /* ========================================================================== */
-/* ESC ARM                                                                    */
+/* ESC ARMING                                                                 */
 /* ========================================================================== */
 
 static void ESC_Arm(void)
@@ -208,38 +224,225 @@ static void ESC_Arm(void)
     UART_Send_Text(
         "\r\n"
         "========================================\r\n"
-        "             ESC ARMING                \r\n"
+        "              ESC ARMING\r\n"
         "========================================\r\n"
     );
 
-
-    /*
-     * Minimum throttle
-     */
-
-    ESC_SetPulse(1000U);
-
+    ESC_SetPulse(ESC_MIN_US);
 
     UART_Send_Text(
-        "ESC PWM = 1000 us\r\n"
+        "ESC = 1000 us\r\n"
     );
-
-
-    UART_Send_Text(
-        "Waiting 5 seconds...\r\n"
-    );
-
-
-    /*
-     * Attendre l'initialisation de l'ESC
-     */
 
     HAL_Delay(5000);
 
+    UART_Send_Text(
+        "ESC ARMING DONE\r\n"
+    );
 
     UART_Send_Text(
-        "ESC READY\r\n"
+        "========================================\r\n"
     );
+}
+
+
+/* ========================================================================== */
+/* RGB LED                                                                    */
+/* ========================================================================== */
+
+static void RGB_SetColor(
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue
+)
+{
+    /* RED = PA8 */
+
+    HAL_GPIO_WritePin(
+        GPIOA,
+        GPIO_PIN_8,
+        red ? GPIO_PIN_SET : GPIO_PIN_RESET
+    );
+
+    /* GREEN = PC8 */
+
+    HAL_GPIO_WritePin(
+        GPIOC,
+        GPIO_PIN_8,
+        green ? GPIO_PIN_SET : GPIO_PIN_RESET
+    );
+
+    /* BLUE = PC6 */
+
+    HAL_GPIO_WritePin(
+        GPIOC,
+        GPIO_PIN_6,
+        blue ? GPIO_PIN_SET : GPIO_PIN_RESET
+    );
+}
+
+
+/* ========================================================================== */
+/* RGB FROM ADC                                                               */
+/* ========================================================================== */
+
+static void RGB_UpdateFromADC(uint32_t adc)
+{
+    /*
+     * ADC < 1000
+     *     -> BLUE
+     *
+     * ADC 1000 ... 3000
+     *     -> GREEN
+     *
+     * ADC > 3000
+     *     -> RED
+     */
+
+    if (adc < 1000U)
+    {
+        RGB_SetColor(
+            0,
+            0,
+            1
+        );
+    }
+    else if (adc <= 3000U)
+    {
+        RGB_SetColor(
+            0,
+            1,
+            0
+        );
+    }
+    else
+    {
+        RGB_SetColor(
+            1,
+            0,
+            0
+        );
+    }
+}
+
+
+/* ========================================================================== */
+/* MPU6050 DIAGNOSTIC                                                         */
+/* ========================================================================== */
+
+static void MPU_Diagnostic_Read(void)
+{
+    uint8_t who_am_i = 0;
+    uint8_t pwr = 0;
+    uint8_t sample = 0;
+    uint8_t config = 0;
+    uint8_t gyro_config = 0;
+    uint8_t accel_config = 0;
+
+    char msg[300];
+
+    /* WHO_AM_I */
+
+    if (HAL_I2C_Mem_Read(
+            &hi2c1,
+            MPU6050_ADDR,
+            WHO_AM_I_REG,
+            I2C_MEMADD_SIZE_8BIT,
+            &who_am_i,
+            1,
+            100
+        ) != HAL_OK)
+    {
+        UART_Send_Text(
+            "WHO_AM_I READ ERROR\r\n"
+        );
+
+        return;
+    }
+
+    /* PWR_MGMT_1 */
+
+    HAL_I2C_Mem_Read(
+        &hi2c1,
+        MPU6050_ADDR,
+        PWR_MGMT_1_REG,
+        I2C_MEMADD_SIZE_8BIT,
+        &pwr,
+        1,
+        100
+    );
+
+    /* SMPLRT_DIV */
+
+    HAL_I2C_Mem_Read(
+        &hi2c1,
+        MPU6050_ADDR,
+        SMPLRT_DIV_REG,
+        I2C_MEMADD_SIZE_8BIT,
+        &sample,
+        1,
+        100
+    );
+
+    /* CONFIG */
+
+    HAL_I2C_Mem_Read(
+        &hi2c1,
+        MPU6050_ADDR,
+        CONFIG_REG,
+        I2C_MEMADD_SIZE_8BIT,
+        &config,
+        1,
+        100
+    );
+
+    /* GYRO_CONFIG */
+
+    HAL_I2C_Mem_Read(
+        &hi2c1,
+        MPU6050_ADDR,
+        GYRO_CONFIG_REG,
+        I2C_MEMADD_SIZE_8BIT,
+        &gyro_config,
+        1,
+        100
+    );
+
+    /* ACCEL_CONFIG */
+
+    HAL_I2C_Mem_Read(
+        &hi2c1,
+        MPU6050_ADDR,
+        ACCEL_CONFIG_REG,
+        I2C_MEMADD_SIZE_8BIT,
+        &accel_config,
+        1,
+        100
+    );
+
+    snprintf(
+        msg,
+        sizeof(msg),
+
+        "\r\n"
+        "========== MPU6050 DIAGNOSTIC ==========\r\n"
+        "WHO_AM_I     = 0x%02X\r\n"
+        "PWR_MGMT_1   = 0x%02X\r\n"
+        "SMPLRT_DIV   = 0x%02X\r\n"
+        "CONFIG       = 0x%02X\r\n"
+        "GYRO_CONFIG  = 0x%02X\r\n"
+        "ACCEL_CONFIG = 0x%02X\r\n"
+        "=========================================\r\n",
+
+        who_am_i,
+        pwr,
+        sample,
+        config,
+        gyro_config,
+        accel_config
+    );
+
+    UART_Send_Text(msg);
 }
 
 
@@ -247,44 +450,94 @@ static void ESC_Arm(void)
 /* UART STATUS                                                                */
 /* ========================================================================== */
 
-static void UART_Send_Status(void)
+static void Send_Status(void)
 {
-    char message[200];
+    char msg[500];
 
-
-    if (mpu_ok == 1)
+    if (mpu_ok)
     {
+        /*
+         * Ax, Ay, Az sont en g.
+         * Conversion en mg :
+         *
+         * 1 g = 1000 mg
+         */
+
+        double Ax_mg = MPU6050.Ax * 1000.0;
+        double Ay_mg = MPU6050.Ay * 1000.0;
+        double Az_mg = MPU6050.Az * 1000.0;
+
         snprintf(
-            message,
-            sizeof(message),
+            msg,
+            sizeof(msg),
 
             "ADC=%lu | "
-            "Roll=%.2f | "
-            "Pitch=%.2f | "
             "ESC=%lu us | "
-            "MOTOR=%u\r\n",
+            "MOTOR=%d | "
+            "RGB=%s\r\n"
+
+            "ACC: "
+            "X=%.0f mg | "
+            "Y=%.0f mg | "
+            "Z=%.0f mg\r\n"
+
+            "GYRO: "
+            "X=%.2f deg/s | "
+            "Y=%.2f deg/s | "
+            "Z=%.2f deg/s\r\n"
+
+            "TEMP=%.2f C | "
+            "ROLL=%.2f deg | "
+            "PITCH=%.2f deg\r\n"
+
+            "RAW ACC: "
+            "X=%d | "
+            "Y=%d | "
+            "Z=%d\r\n"
+
+            "----------------------------------------\r\n",
 
             (unsigned long)AD_RES,
 
-            MPU6050.KalmanAngleX,
-
-            MPU6050.KalmanAngleY,
-
             (unsigned long)ESC_Pulse,
 
-            motor_running
+            motor_running,
+
+            (AD_RES < 1000U)
+                ? "BLUE"
+                : ((AD_RES <= 3000U)
+                    ? "GREEN"
+                    : "RED"),
+
+            Ax_mg,
+            Ay_mg,
+            Az_mg,
+
+            MPU6050.Gx,
+            MPU6050.Gy,
+            MPU6050.Gz,
+
+            MPU6050.Temperature,
+
+            MPU6050.KalmanAngleX,
+            MPU6050.KalmanAngleY,
+
+            MPU6050.Accel_X_RAW,
+            MPU6050.Accel_Y_RAW,
+            MPU6050.Accel_Z_RAW
         );
     }
     else
     {
         snprintf(
-            message,
-            sizeof(message),
+            msg,
+            sizeof(msg),
 
             "ADC=%lu | "
             "MPU ERROR=%u | "
             "ESC=%lu us | "
-            "MOTOR=%u\r\n",
+            "MOTOR=%d | "
+            "RGB=%s\r\n",
 
             (unsigned long)AD_RES,
 
@@ -292,103 +545,85 @@ static void UART_Send_Status(void)
 
             (unsigned long)ESC_Pulse,
 
-            motor_running
+            motor_running,
+
+            (AD_RES < 1000U)
+                ? "BLUE"
+                : ((AD_RES <= 3000U)
+                    ? "GREEN"
+                    : "RED")
         );
     }
 
-
-    UART_Send_Text(message);
+    UART_Send_Text(msg);
 }
 
 
-/* ========================================================================== */
-/* MAIN                                                                       */
-/* ========================================================================== */
+/* USER CODE END 0 */
 
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
-    uint32_t loop_counter = 0;
+    /* USER CODE BEGIN 1 */
 
+    /* USER CODE END 1 */
 
-    /* ====================================================================== */
-    /* HAL INITIALIZATION                                                     */
-    /* ====================================================================== */
+    /* MCU Configuration--------------------------------------------------------*/
 
     HAL_Init();
 
+    /* USER CODE BEGIN Init */
 
-    /* ====================================================================== */
-    /* SYSTEM CLOCK                                                            */
-    /* ====================================================================== */
+    /* USER CODE END Init */
 
     SystemClock_Config();
 
+    /* USER CODE BEGIN SysInit */
 
-    /* ====================================================================== */
-    /* GPIO                                                                    */
-    /* ====================================================================== */
+    /* USER CODE END SysInit */
+
+    /* Initialize all configured peripherals */
 
     MX_GPIO_Init();
 
-
-    /* ====================================================================== */
-    /* I2C1                                                                    */
-    /* ====================================================================== */
+    MX_ADC1_Init();
 
     MX_I2C1_Init();
 
-
-    /* ====================================================================== */
-    /* TIM1                                                                    */
-    /* ====================================================================== */
-
     MX_TIM1_Init();
-
-
-    /* ====================================================================== */
-    /* USART2                                                                  */
-    /* ====================================================================== */
 
     MX_USART2_UART_Init();
 
-
-    /* ====================================================================== */
-    /* ADC1                                                                    */
-    /* ====================================================================== */
-
-    MX_ADC1_Init();
-
-
-    /* ====================================================================== */
-    /* WAIT                                                                    */
-    /* ====================================================================== */
+    /* USER CODE BEGIN 2 */
 
     HAL_Delay(500);
 
-
-    /* ====================================================================== */
-    /* START MESSAGE                                                           */
-    /* ====================================================================== */
-
     UART_Send_Text(
         "\r\n"
-        "\r\n"
         "========================================\r\n"
-        "        STM32F407VGT6                  \r\n"
-        "        ADC + ESC + MPU6050            \r\n"
+        "          STM32F407VGT6\r\n"
         "========================================\r\n"
-        "\r\n"
+        "      ADC + ESC + MPU6050 + RGB\r\n"
+        "========================================\r\n"
     );
 
+    /* RGB startup = BLUE */
 
-    /* ====================================================================== */
-    /* START TIM1 PWM                                                          */
-    /* ====================================================================== */
+    RGB_SetColor(
+        0,
+        0,
+        1
+    );
 
     UART_Send_Text(
-        "Starting TIM1 PWM...\r\n"
+        "RGB = BLUE\r\n"
     );
 
+    /* Start TIM1 PWM */
 
     if (HAL_TIM_PWM_Start(
             &htim1,
@@ -396,137 +631,92 @@ int main(void)
         ) != HAL_OK)
     {
         UART_Send_Text(
-            "ERROR: TIM1 PWM START FAILED\r\n"
+            "ERROR: TIM1 PWM START\r\n"
         );
 
         Error_Handler();
     }
 
-
     UART_Send_Text(
         "TIM1 PWM OK\r\n"
     );
 
+    /* ESC arming */
 
-    /* ====================================================================== */
-    /* INITIAL ESC VALUE                                                       */
-    /* ====================================================================== */
+    ESC_Arm();
 
-    ESC_SetPulse(1000U);
-
-
-    /* ====================================================================== */
-    /* MPU6050 INITIALIZATION                                                  */
-    /* ====================================================================== */
+    /* MPU6050 */
 
     UART_Send_Text(
-        "\r\n"
-        "MPU6050 initialization...\r\n"
+        "Initializing MPU6050...\r\n"
     );
 
-
-    mpu_error =
-        MPU6050_Init(&hi2c1);
-
+    mpu_error = MPU6050_Init(&hi2c1);
 
     if (mpu_error == 0)
     {
         mpu_ok = 1;
 
         UART_Send_Text(
-            "MPU6050 OK\r\n"
+            "MPU6050 READY\r\n"
+        );
+
+        UART_Send_Text(
+            "ACCEL = mg\r\n"
         );
     }
     else
     {
         mpu_ok = 0;
 
-        char error_message[120];
-
-
-        snprintf(
-            error_message,
-            sizeof(error_message),
-
-            "MPU6050 ERROR - CODE=%u\r\n",
-
-            mpu_error
-        );
-
-
         UART_Send_Text(
-            error_message
+            "MPU6050 ERROR\r\n"
         );
 
-
-        UART_Send_Text(
-            "WARNING: MPU6050 unavailable.\r\n"
-        );
-
-
-        UART_Send_Text(
-            "ADC can still control the motor.\r\n"
-        );
+        MPU_Diagnostic_Read();
     }
 
+    /* ESC initial value */
 
-    /* ====================================================================== */
-    /* ESC ARM                                                                 */
-    /* ====================================================================== */
-
-    ESC_Arm();
-
-
-    /* ====================================================================== */
-    /* APPLICATION START                                                       */
-    /* ====================================================================== */
-
-    UART_Send_Text(
-        "\r\n"
-        "========================================\r\n"
-        "        APPLICATION START               \r\n"
-        "========================================\r\n"
+    ESC_SetPulse(
+        ESC_MIN_US
     );
 
+    /* USER CODE END 2 */
 
-    UART_Send_Text(
-        "ADC -> ESC -> MOTOR\r\n"
-    );
+    /* Infinite loop */
 
-
-    UART_Send_Text(
-        "ADC = 0    -> ESC = 1000 us\r\n"
-    );
-
-
-    UART_Send_Text(
-        "ADC = 4095 -> ESC = 1500 us\r\n"
-    );
-
-
-    UART_Send_Text(
-        "MPU6050 = diagnostic sensor\r\n"
-    );
-
-
-    /* ====================================================================== */
-    /* MAIN LOOP                                                               */
-    /* ====================================================================== */
+    /* USER CODE BEGIN WHILE */
 
     while (1)
     {
-        /* ================================================================== */
-        /* READ ADC                                                            */
-        /* ================================================================== */
+        /* USER CODE END WHILE */
+
+        /* USER CODE BEGIN 3 */
+
+        /* Read ADC */
 
         AD_RES = ADC_Read();
 
+        /* Update RGB */
 
-        /* ================================================================== */
-        /* READ MPU6050                                                        */
-        /* ================================================================== */
+        RGB_UpdateFromADC(
+            AD_RES
+        );
 
-        if (mpu_ok == 1)
+        /* ADC -> ESC */
+
+        ESC_Pulse = ADC_To_ESC(
+            AD_RES
+        );
+
+        ESC_SetPulse(
+            ESC_Pulse
+        );
+
+        /* Read MPU6050 */
+
+        if (mpu_ok)
         {
             MPU6050_Read_All(
                 &hi2c1,
@@ -534,128 +724,56 @@ int main(void)
             );
         }
 
+        /* UART */
 
-        /* ================================================================== */
-        /* ADC -> ESC                                                           */
-        /* ================================================================== */
+        Send_Status();
 
-        ESC_Pulse =
-            ADC_To_ESC(
-                AD_RES
-            );
+        HAL_Delay(100);
 
-
-        ESC_SetPulse(
-            ESC_Pulse
-        );
-
-
-        /* ================================================================== */
-        /* LED MOTOR STATUS                                                    */
-        /* ================================================================== */
-
-        if (motor_running == 1)
-        {
-            HAL_GPIO_WritePin(
-                GPIOD,
-                GPIO_PIN_12,
-                GPIO_PIN_SET
-            );
-        }
-        else
-        {
-            HAL_GPIO_WritePin(
-                GPIOD,
-                GPIO_PIN_12,
-                GPIO_PIN_RESET
-            );
-        }
-
-
-        /* ================================================================== */
-        /* UART DEBUG                                                           */
-        /* ================================================================== */
-
-        if ((loop_counter % 10U) == 0U)
-        {
-            UART_Send_Status();
-        }
-
-
-        /* ================================================================== */
-        /* LOOP COUNTER                                                        */
-        /* ================================================================== */
-
-        loop_counter++;
-
-
-        /* ================================================================== */
-        /* 20 ms CONTROL PERIOD                                                */
-        /* ================================================================== */
-
-        HAL_Delay(20);
+        /* USER CODE END 3 */
     }
 }
 
 
-/* ========================================================================== */
-/* SYSTEM CLOCK CONFIGURATION                                                 */
-/* ========================================================================== */
-
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
 
     RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-
-    /* ====================================================================== */
-    /* POWER                                                                   */
-    /* ====================================================================== */
-
     __HAL_RCC_PWR_CLK_ENABLE();
-
 
     __HAL_PWR_VOLTAGESCALING_CONFIG(
         PWR_REGULATOR_VOLTAGE_SCALE1
     );
 
-
-    /* ====================================================================== */
-    /* HSE + PLL                                                               */
-    /* ====================================================================== */
-
     RCC_OscInitStruct.OscillatorType =
         RCC_OSCILLATORTYPE_HSE;
-
 
     RCC_OscInitStruct.HSEState =
         RCC_HSE_ON;
 
-
     RCC_OscInitStruct.PLL.PLLState =
         RCC_PLL_ON;
-
 
     RCC_OscInitStruct.PLL.PLLSource =
         RCC_PLLSOURCE_HSE;
 
-
     RCC_OscInitStruct.PLL.PLLM =
-        4;
-
+        8;
 
     RCC_OscInitStruct.PLL.PLLN =
-        168;
-
+        336;
 
     RCC_OscInitStruct.PLL.PLLP =
         RCC_PLLP_DIV2;
 
-
     RCC_OscInitStruct.PLL.PLLQ =
-        4;
-
+        7;
 
     if (HAL_RCC_OscConfig(
             &RCC_OscInitStruct
@@ -664,33 +782,23 @@ void SystemClock_Config(void)
         Error_Handler();
     }
 
-
-    /* ====================================================================== */
-    /* CLOCK CONFIGURATION                                                     */
-    /* ====================================================================== */
-
     RCC_ClkInitStruct.ClockType =
-          RCC_CLOCKTYPE_HCLK
-        | RCC_CLOCKTYPE_SYSCLK
-        | RCC_CLOCKTYPE_PCLK1
-        | RCC_CLOCKTYPE_PCLK2;
-
+        RCC_CLOCKTYPE_HCLK |
+        RCC_CLOCKTYPE_SYSCLK |
+        RCC_CLOCKTYPE_PCLK1 |
+        RCC_CLOCKTYPE_PCLK2;
 
     RCC_ClkInitStruct.SYSCLKSource =
         RCC_SYSCLKSOURCE_PLLCLK;
 
-
     RCC_ClkInitStruct.AHBCLKDivider =
         RCC_SYSCLK_DIV1;
-
 
     RCC_ClkInitStruct.APB1CLKDivider =
         RCC_HCLK_DIV4;
 
-
     RCC_ClkInitStruct.APB2CLKDivider =
         RCC_HCLK_DIV2;
-
 
     if (HAL_RCC_ClockConfig(
             &RCC_ClkInitStruct,
@@ -702,42 +810,47 @@ void SystemClock_Config(void)
 }
 
 
-/* ========================================================================== */
-/* ERROR HANDLER                                                              */
-/* ========================================================================== */
-
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+    /* USER CODE BEGIN Error_Handler_Debug */
+
+    __HAL_TIM_SET_COMPARE(
+        &htim1,
+        TIM_CHANNEL_1,
+        ESC_MIN_US
+    );
+
     __disable_irq();
-
-
-    /*
-     * Sécurité ESC :
-     * minimum throttle
-     */
-
-    if (htim1.Instance != NULL)
-    {
-        __HAL_TIM_SET_COMPARE(
-            &htim1,
-            TIM_CHANNEL_1,
-            1000U
-        );
-    }
-
 
     while (1)
     {
-        HAL_GPIO_TogglePin(
-            GPIOD,
-            GPIO_PIN_13
-        );
-
-        HAL_Delay(200);
     }
+
+    /* USER CODE END Error_Handler_Debug */
 }
 
 
-/* USER CODE BEGIN 4 */
+#ifdef USE_FULL_ASSERT
 
-/* USER CODE END 4 */
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  */
+void assert_failed(
+    uint8_t *file,
+    uint32_t line
+)
+{
+    /* USER CODE BEGIN 6 */
+
+    (void)file;
+    (void)line;
+
+    /* USER CODE END 6 */
+}
+
+#endif

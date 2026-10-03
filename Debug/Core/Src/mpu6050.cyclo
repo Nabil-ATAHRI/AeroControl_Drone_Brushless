@@ -1,6 +1,9 @@
-../Core/Src/mpu6050.c:60:8:Kalman_getAngle	1
-../Core/Src/mpu6050.c:190:9:MPU6050_Init	8
-../Core/Src/mpu6050.c:367:6:MPU6050_Read_Accel	2
-../Core/Src/mpu6050.c:435:6:MPU6050_Read_Gyro	2
-../Core/Src/mpu6050.c:503:6:MPU6050_Read_Temp	2
-../Core/Src/mpu6050.c:547:6:MPU6050_Read_All	2
+../Core/Src/mpu6050.c:80:13:MPU_UART_Send	1
+../Core/Src/mpu6050.c:91:13:MPU_UART_SendHex	1
+../Core/Src/mpu6050.c:110:13:MPU_UART_SendError	1
+../Core/Src/mpu6050.c:133:9:MPU6050_Init	9
+../Core/Src/mpu6050.c:385:6:MPU6050_Read_Accel	2
+../Core/Src/mpu6050.c:438:6:MPU6050_Read_Gyro	2
+../Core/Src/mpu6050.c:491:6:MPU6050_Read_Temp	2
+../Core/Src/mpu6050.c:527:6:MPU6050_Read_All	2
+../Core/Src/mpu6050.c:682:8:Kalman_getAngle	1

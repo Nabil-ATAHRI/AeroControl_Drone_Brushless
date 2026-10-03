@@ -1,46 +1,21 @@
 #ifndef INC_MPU6050_H_
 #define INC_MPU6050_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include "main.h"
+#include "i2c.h"
 #include <stdint.h>
 
-
-/* ============================================================
- * MPU6050 ADDRESS
- *
- * AD0 = GND -> 0x68
- * AD0 = VCC -> 0x69
- *
- * HAL uses 8-bit I2C address
- * ============================================================ */
-
-#define MPU6050_ADDR        (0x68 << 1)
-
-
-/* ============================================================
- * MPU6050 REGISTERS
- * ============================================================ */
+#define MPU6050_ADDR        (0x68U << 1)
 
 #define WHO_AM_I_REG        0x75U
 #define PWR_MGMT_1_REG      0x6BU
 #define SMPLRT_DIV_REG      0x19U
 #define CONFIG_REG          0x1AU
-
 #define GYRO_CONFIG_REG     0x1BU
 #define ACCEL_CONFIG_REG    0x1CU
-
 #define ACCEL_XOUT_H_REG    0x3BU
 #define TEMP_OUT_H_REG      0x41U
 #define GYRO_XOUT_H_REG     0x43U
-
-
-/* ============================================================
- * MPU6050 STRUCTURE
- * ============================================================ */
 
 typedef struct
 {
@@ -48,13 +23,13 @@ typedef struct
     int16_t Accel_Y_RAW;
     int16_t Accel_Z_RAW;
 
-    double Ax;
-    double Ay;
-    double Az;
-
     int16_t Gyro_X_RAW;
     int16_t Gyro_Y_RAW;
     int16_t Gyro_Z_RAW;
+
+    double Ax;
+    double Ay;
+    double Az;
 
     double Gx;
     double Gy;
@@ -67,10 +42,6 @@ typedef struct
 
 } MPU6050_t;
 
-
-/* ============================================================
- * KALMAN FILTER STRUCTURE
- * ============================================================ */
 
 typedef struct
 {
@@ -86,38 +57,27 @@ typedef struct
 } Kalman_t;
 
 
-/* ============================================================
- * FUNCTIONS
- * ============================================================ */
-
-uint8_t MPU6050_Init(
-    I2C_HandleTypeDef *I2Cx
-);
-
+uint8_t MPU6050_Init(I2C_HandleTypeDef *I2Cx);
 
 void MPU6050_Read_Accel(
     I2C_HandleTypeDef *I2Cx,
     MPU6050_t *DataStruct
 );
 
-
 void MPU6050_Read_Gyro(
     I2C_HandleTypeDef *I2Cx,
     MPU6050_t *DataStruct
 );
-
 
 void MPU6050_Read_Temp(
     I2C_HandleTypeDef *I2Cx,
     MPU6050_t *DataStruct
 );
 
-
 void MPU6050_Read_All(
     I2C_HandleTypeDef *I2Cx,
     MPU6050_t *DataStruct
 );
-
 
 double Kalman_getAngle(
     Kalman_t *Kalman,
@@ -125,10 +85,5 @@ double Kalman_getAngle(
     double newRate,
     double dt
 );
-
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif
